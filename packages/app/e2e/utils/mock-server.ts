@@ -451,17 +451,20 @@ export async function mockOpenCodeServer(page: Page, config: MockServerConfig) {
 }
 
 // Answers every Location-scoped request for `directory` as the server does once that folder is deleted.
-export function mockMissingLocation(page: Page, directory: string) {
+export function mockMissingLocation(page: Page, directory: string, missing = () => true) {
   return page.route(
     (url) => url.pathname.startsWith("/api/") && url.searchParams.get("location[directory]") === directory,
-    (route) =>
-      route.fulfill({
+    (route) => {
+      if (!missing()) return route.fallback()
+
+      return route.fulfill({
         status: 404,
         // SAFETY: the server's wire body for a missing Location, which the client decodes into its own error.
         // oxlint-disable-next-line anti-slop-effect/no-manual-tagged-construction -- see SAFETY above
         json: { _tag: "LocationNotFoundError", location: { directory }, message: `Location not found: ${directory}` },
         headers: { "access-control-allow-origin": "*" },
-      }),
+      })
+    },
   )
 }
 

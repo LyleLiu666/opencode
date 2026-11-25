@@ -17,6 +17,8 @@ export type WorkspaceLocation = LocationContext & {
   readonly current: LocationGetOutput | undefined
   /** Set only when the server reports that this exact Location's folder does not exist. */
   readonly missing: LocationRef | undefined
+  readonly canRetryMissing: boolean
+  readonly retryMissing: () => void
 }
 
 const context = createSimpleContext({
@@ -83,6 +85,15 @@ const context = createSimpleContext({
     })
     onCleanup(() => dispatch({ type: "disposed" }))
     const missing = createMemo(() => missingLocation(syncState(), ref()))
+    const canRetryMissing = createMemo(() => connected() && syncState().status === "missing")
+
+    function retryMissing() {
+      if (!canRetryMissing()) return
+
+      const location = ref()
+      data.location.invalidate(location)
+      dispatch({ type: "target.updated", location, connected: true })
+    }
 
     createEffect(() => {
       const id = current()?.project.id
@@ -99,6 +110,8 @@ const context = createSimpleContext({
       ref: ref(),
       current: current(),
       missing: missing(),
+      canRetryMissing: canRetryMissing(),
+      retryMissing,
     }))
   },
 })

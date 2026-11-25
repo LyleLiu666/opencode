@@ -1,8 +1,10 @@
 import { Tooltip } from "@opencode/ui/tooltip"
+import { Button } from "@opencode/ui/button"
+import { Card, CardActions, CardDescription, CardTitle } from "@opencode/ui/card"
 import { Icon } from "@opencode/ui/icon"
 import { Keybind } from "@opencode/ui/keybind"
 import { useCommand } from "@/shell/commands/command"
-import { Match, Show, Switch, createComputed, createMemo, createSignal, onCleanup, untrack } from "solid-js"
+import { Match, Show, Switch, createComputed, createMemo, createSignal, createUniqueId, onCleanup, untrack } from "solid-js"
 import { createStore } from "solid-js/store"
 import { createResizeObserver } from "@solid-primitives/resize-observer"
 import {
@@ -112,7 +114,7 @@ export function NewSessionView(props: {
             <div class="mt-8 flex flex-col gap-3">
               <div data-slot="new-session-composer" class="flex flex-col gap-1">
                 <div class="relative z-10">
-                  <Composer model={props.composer} />
+                  <DraftComposer model={props.composer} />
                 </div>
                 <Show when={props.project.selected()}>
                   {(project) => (
@@ -161,6 +163,33 @@ export function NewSessionView(props: {
   )
 }
 
+function DraftComposer(props: { model: ComposerModel }) {
+  const location = useWorkspaceLocation()
+  const language = useLanguage()
+  const titleID = createUniqueId()
+
+  return (
+    <Show when={location().missing} fallback={<Composer model={props.model} />}>
+      {(missing) => (
+        <Card variant="warning" role="group" aria-labelledby={titleID} aria-describedby={`${titleID}-details`}>
+          <CardTitle variant="warning" role="status" id={titleID}>
+            {language.t("session.new.project.missing")}
+          </CardTitle>
+          <CardDescription id={`${titleID}-details`}>
+            <code class="block break-all">{missing().directory}</code>
+            {language.t("session.new.project.missing.description")}
+          </CardDescription>
+          <CardActions>
+            <Button onClick={() => location().retryMissing()} disabled={!location().canRetryMissing}>
+              {language.t("common.retry")}
+            </Button>
+          </CardActions>
+        </Card>
+      )}
+    </Show>
+  )
+}
+
 function NewSessionTips(props: { selection: ComposerModel["model"]["selection"]; onDone: () => void }) {
   const sdk = useWorkspaceLocation()
   const tip = createProviderTip(() => sdk().directory)
@@ -203,6 +232,7 @@ function NewSessionLocation(props: {
   onWorktree?: () => void
 }) {
   const language = useLanguage()
+  const location = useWorkspaceLocation()
   const command = useCommand()
   const [layout, setLayout] = createStore({ width: 0, font: "" })
 
@@ -378,7 +408,7 @@ function NewSessionLocation(props: {
         </div>
       </div>
       {/* An open tooltip can outlive this row; keep its path instead of a stale Show accessor. */}
-      <Show when={path()} keyed>
+      <Show when={!location().missing && path()} keyed>
         {(directory) => (
           <div
             class="flex min-w-0 flex-1 justify-end pe-1.5 @max-[560px]:hidden"

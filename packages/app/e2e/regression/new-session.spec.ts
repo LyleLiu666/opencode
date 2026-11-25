@@ -2,7 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test"
 import type { OpenCodeEvent, SessionMessageInfo, WorktreeDirectory } from "@opencode/client/promise"
 import { timelinePresets } from "@opencode/session-ui/timeline/detail"
 import { draftHref, expectPath, holdRoute, NO_PROVIDER, project, provider, seed, sessionHref, T0 } from "../utils/app"
-import { mockOpenCodeServer } from "../utils/mock-server"
+import { mockMissingLocation, mockOpenCodeServer } from "../utils/mock-server"
 import {
   newSessionBaseBranch,
   newSessionLocation,
@@ -135,6 +135,47 @@ test("the location shortcuts choose worktrees from every state and keep cycling"
   await page.getByRole("option", { name: /^quiet-river / }).click()
   await expect(path).toHaveText(existing)
   await expect(view.editor).toBeFocused()
+})
+
+test("a missing project shows its folder and lets the draft switch or retry", async ({ page }) => {
+  const healthyName = "HealthyProject"
+  const movedName = "MovedProject"
+  const healthy = project({ id: "proj_healthy", directory: "C:/OpenCode/HealthyProject", name: healthyName, vcs: undefined })
+  const moved = project({ id: "proj_moved", directory: "C:/OpenCode/MovedProject", name: movedName, vcs: undefined })
+  let missing = true
+  const view = await openDraft(page, {
+    name: healthyName,
+    directory: healthy.canonical,
+    project: healthy,
+    projects: () => [healthy, moved],
+    beforeOpen: async () => {
+      await mockMissingLocation(page, moved.canonical, () => missing)
+    },
+  })
+  const select = async (name: string) => {
+    await newSessionLocation(page).click()
+    const search = page.getByRole("combobox", { name: "Search projects", exact: true })
+    await search.fill(name)
+    await page.getByRole("option", { name: new RegExp(name) }).click()
+    await expect(newSessionLocation(page)).toContainText(name)
+  }
+  const unavailable = page.getByRole("group", { name: "Project folder unavailable", exact: true })
+  await select(movedName)
+  await expect(unavailable).toContainText(moved.canonical)
+  await expect(view.editor).toHaveCount(0)
+
+  await select(healthyName)
+  await expect(unavailable).toHaveCount(0)
+  await expect(view.editor).toBeEditable()
+
+  await select(movedName)
+  const retry = unavailable.getByRole("button", { name: "Try again", exact: true })
+  await expect(retry).toBeEnabled()
+  missing = false
+  await retry.click()
+  await expect(unavailable).toHaveCount(0)
+  await expect(view.editor).toBeEditable()
+  await expect(newSessionLocation(page)).toContainText(movedName)
 })
 
 test("the main checkout shows its branch and is targeted when the draft opened in a worktree", async ({ page }) => {
