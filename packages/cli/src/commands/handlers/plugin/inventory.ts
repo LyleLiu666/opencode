@@ -4,6 +4,7 @@ import { OpenCode } from "@opencode/client"
 import { Service } from "@opencode/client/effect/service"
 import { Npm } from "@opencode/util/npm"
 import { Config } from "../../../config"
+import { readPluginInventory } from "../../../services/plugin-startup"
 import { ServerConnection } from "../../../services/server-connection"
 
 export interface Item {
@@ -19,7 +20,7 @@ export const inspect = Effect.fn("cli.plugin.inspect")(function* (selected?: str
   const { endpoint } = yield* ServerConnection.resolve()
   const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
   const location = { directory: process.cwd() }
-  const listed = yield* Effect.promise(() => client.plugin.list({ location }))
+  const listed = yield* readPluginInventory(client, location.directory)
   const serverTargets = new Set(
     listed.data.flatMap((plugin) => (plugin.source.type === "package" ? [plugin.source.target] : [])),
   )
