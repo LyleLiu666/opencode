@@ -265,6 +265,31 @@ test("centralizes named command defaults and resolves explicit none", () => {
   Object.keys(defaults).forEach((command) => expect(disabled.keybinds.get(command)).toEqual([]))
 })
 
+test("disables a keybind when its alternatives contain only none", () => {
+  const command = "session.sidebar.toggle"
+
+  for (const value of [["none"], ["none", "none"], [], "none", false]) {
+    const config = resolve(decodeInfo({ keybinds: { [command]: value } }), { terminalSuspend: true })
+    expect(config.keybinds.has(command)).toBe(false)
+    expect(config.keybinds.get(command)).toEqual([])
+  }
+})
+
+test("keeps the other alternatives of a keybind that contains none", () => {
+  const command = "session.sidebar.toggle"
+  const alternatives = ["f7", { name: "f8" }, { key: "f9", event: "release", preventDefault: false }, "n o n e"]
+
+  for (const value of [alternatives, ["none", ...alternatives, "none"]]) {
+    const config = resolve(decodeInfo({ keybinds: { [command]: value } }), { terminalSuspend: true })
+    expect(config.keybinds.get(command)).toMatchObject([
+      { key: "f7" },
+      { key: { name: "f8" } },
+      { key: "f9", event: "release", preventDefault: false },
+      { key: "n o n e" },
+    ])
+  }
+})
+
 test("retired diff tree keybinds remain accepted but have no default bindings", () => {
   const ids = ["diff.toggle", "diff.expand", "diff.expand_all", "diff.collapse", "diff.switch_focus"]
   const defaults = resolve({}, { terminalSuspend: true })
