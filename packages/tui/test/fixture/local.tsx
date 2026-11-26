@@ -24,6 +24,7 @@ export async function renderLocal(
     models?: ModelInfo[]
     agents?: AgentInfo[]
     sessions?: SessionInfo[]
+    pins?: string[]
     preferences?: Partial<ModelPreference>
     args?: Args
     config?: Parameters<typeof createTuiResolvedConfig>[0]
@@ -32,6 +33,7 @@ export async function renderLocal(
 ) {
   const temporary = await tmpdir()
   await Bun.write(path.join(temporary.path, "model.json"), JSON.stringify(input.preferences ?? {}))
+  if (input.pins) await Bun.write(path.join(temporary.path, "session.json"), JSON.stringify({ pinned: input.pins }))
   const events = createEventStream()
   const calls = createFetch(async (url, request) => {
     const response = await input.fetch?.(url, request)
@@ -89,7 +91,7 @@ export async function renderLocal(
     ),
     { width: 100, height: 30, kittyKeyboard: true },
   )
-  await waitForModel(() => local !== undefined && local.model.ready)
+  await waitForLocal(() => local !== undefined && local.model.ready && local.session.ready)
   await data.location.sync()
   return {
     ...setup,
@@ -107,10 +109,10 @@ export async function renderLocal(
   }
 }
 
-async function waitForModel(ready: () => boolean) {
+async function waitForLocal(ready: () => boolean) {
   const started = Date.now()
   while (!ready()) {
-    if (Date.now() - started > 2_000) throw new Error("Timed out waiting for local model data")
+    if (Date.now() - started > 2_000) throw new Error("Timed out waiting for local state")
     await Bun.sleep(10)
   }
 }

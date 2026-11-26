@@ -709,7 +709,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
 
           const session = data.session.get(target)
-          if (!session || session.parentID !== undefined) return
+          if (!session || session.parentID !== undefined || session.time.archived !== undefined) return
           route.navigate({ type: "session", sessionID: target })
         },
       }

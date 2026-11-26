@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { InputRenderable, TextareaRenderable } from "@opentui/core"
+import { mkdir } from "node:fs/promises"
 import path from "node:path"
 import type { SessionInfo } from "@opencode/client"
 import { createAppFixture } from "./fixture/app"
@@ -23,12 +24,12 @@ function session(id: string, title: string, order: number): SessionInfo {
   }
 }
 
-async function fixture(state: string, sessions: SessionInfo[], listed = sessions) {
+async function fixture(state: string, sessions: SessionInfo[], listed = sessions, tabs: "off" | "on" = "off") {
   return createAppFixture({
     state,
     width: 100,
     height: 40,
-    config: { animations: false, tabs: { mode: "off" } },
+    config: { animations: false, tabs: tabs === "on" ? { mode: "on", scope: "global" } : { mode: "off" } },
     fetch: (url) => {
       if (url.pathname === "/api/session" && url.searchParams.get("parentID") === "null")
         return json({ data: listed, cursor: {} })
@@ -51,7 +52,7 @@ async function openSessions(setup: Awaited<ReturnType<typeof fixture>>, visible:
   setup.mockInput.pressEnter()
   return setup.waitForFrame(
     (frame) =>
-      frame.includes("rename ctrl+r") &&
+      frame.includes("Sessions") &&
       frame.includes(visible) &&
       setup.renderer.currentFocusedRenderable instanceof InputRenderable,
   )
@@ -97,10 +98,30 @@ test.each(["home", "picker"])("a fresh TUI restores saved quick slots via %s", a
     await openSessions(setup, pin)
     await setup.waitForFrame((frame) => /^ +2 +Pin this session *$/m.test(frame))
     setup.mockInput.pressEscape()
-    await setup.waitForFrame((frame) => !frame.includes("rename ctrl+r"))
+    await setup.waitFor(() => setup.renderer.currentFocusedRenderable instanceof TextareaRenderable)
   }
 
   setup.mockInput.pressKey("x", { ctrl: true })
   setup.mockInput.pressKey("2")
   await setup.waitForFrame((frame) => frame.includes(`History for ${pin}`))
+})
+
+test("leader plus a number switches tabs when tabs are enabled, even with saved pins", async () => {
+  await using state = await tmpdir()
+  const saved = session("ses_pin", pin, 1)
+  const tabs = [session("ses_first", "First tab", 2), session("ses_second", "Second tab", 3)]
+  const tabState = path.join(state.path, "test", "tui")
+  await mkdir(tabState, { recursive: true })
+  await Bun.write(path.join(state.path, "session.json"), JSON.stringify({ pinned: [saved.id] }))
+  await Bun.write(
+    path.join(tabState, "tabs.json"),
+    JSON.stringify({ global: { tabs: tabs.map((item) => ({ sessionID: item.id, title: item.title })) }, cwd: {} }),
+  )
+
+  await using setup = await fixture(state.path, [...tabs, saved], [...tabs, saved], "on")
+  await setup.ready
+  await setup.waitForFrame((frame) => frame.includes("First tab") && frame.includes("Second tab"))
+  setup.mockInput.pressKey("x", { ctrl: true })
+  setup.mockInput.pressKey("1")
+  await setup.waitForFrame((frame) => frame.includes("History for First tab"))
 })
