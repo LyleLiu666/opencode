@@ -2,10 +2,11 @@ import { isAbsolute, join, resolve } from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import type { OpenCodeClient } from "@opencode/client/effect"
 import type { Permission } from "@opencode/schema/permission"
+import { Project } from "@opencode/schema/project"
 import { AbsolutePath } from "@opencode/schema/schema"
 import type { Session } from "@opencode/schema/session"
 import { FSUtil } from "@opencode/util/fs-util"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Option, Schema, Stream } from "effect"
 import { ACPClient } from "./client"
 import { ACPError } from "./error"
 
@@ -27,6 +28,37 @@ export const parseCwd = Effect.fnUntraced(function* (cwd: string) {
   if (!isAbsolute(cwd))
     return yield* new ACPError.InvalidRequestError({ message: `cwd must be an absolute path: ${cwd}`, field: "cwd" })
   return AbsolutePath.make(cwd)
+})
+
+export const canRestoreFrom = Effect.fnUntraced(function* (client: OpenCodeClient, session: Session.Info, cwd: string) {
+  if (session.projectID === Project.ID.global) return false
+
+  const previous = yield* Stream.paginate(undefined, (cursor: string | undefined) =>
+    client.message
+      .list({
+        sessionID: session.id,
+        type: "location-switched",
+        limit: 200,
+        ...(cursor === undefined ? { order: "desc" } : { cursor }),
+      })
+      .pipe(
+        Effect.catch(ACPClient.classify),
+        Effect.map((page) => [page.data, Option.fromNullishOr(page.cursor.next)] as const),
+      ),
+  ).pipe(
+    Stream.filter((message) => message.type === "location-switched"),
+    // Older locations stop being valid when the session leaves its project.
+    Stream.takeWhile((move) => move.projectID === session.projectID && move.previous?.projectID === session.projectID),
+    Stream.filter((move) => move.previous !== undefined && FSUtil.resolve(move.previous.location.directory) === cwd),
+    Stream.runHead,
+  )
+  if (Option.isNone(previous)) return false
+
+  // A formerly used path may now belong to another project.
+  const location = yield* client.location
+    .get({ location: { directory: cwd } })
+    .pipe(Effect.orElseSucceed(() => undefined))
+  return location?.project.id === session.projectID
 })
 
 export function grant(directories: readonly string[]) {

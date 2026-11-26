@@ -95,12 +95,17 @@ export function make(input: {
     yield* input.sessions.select(attached, change)
   })
 
-  const getSession = Effect.fnUntraced(function* (sessionId: string, cwd: string) {
+  const getSession = Effect.fnUntraced(function* (
+    sessionId: string,
+    cwd: string,
+    options?: { readonly restore: true },
+  ) {
     const sessionID = yield* ACPClient.decodeSessionID(sessionId)
     const session = yield* input.client.session.get({ sessionID }).pipe(Effect.catch(ACPClient.classify))
-    if (FSUtil.resolve(cwd) !== FSUtil.resolve(session.location.directory))
-      return yield* new ACPError.SessionDirectoryMismatchError({ sessionId, cwd })
-    return session
+    const directory = FSUtil.resolve(cwd)
+    if (directory === FSUtil.resolve(session.location.directory)) return session
+    if (options?.restore && (yield* ACPDirectories.canRestoreFrom(input.client, session, directory))) return session
+    return yield* new ACPError.SessionDirectoryMismatchError({ sessionId, cwd })
   })
 
   // Clients often open a session and close it without prompting; closing removes those instead of keeping an empty session.
@@ -164,7 +169,7 @@ export function make(input: {
     loadSession: Effect.fnUntraced(function* (params) {
       const directories = yield* ACPDirectories.parse(params.cwd, params.additionalDirectories)
       const mcpServers = yield* supportedMcpServers(params.mcpServers)
-      const session = yield* getSession(params.sessionId, params.cwd)
+      const session = yield* getSession(params.sessionId, params.cwd, { restore: true })
       yield* ACPDirectories.activate(input.client, session, directories)
       const attachment = yield* input.sessions.attach(session, session.location.directory, mcpServers)
       return yield* ACPReplay.history(
@@ -220,7 +225,7 @@ export function make(input: {
     resumeSession: Effect.fnUntraced(function* (params) {
       const directories = yield* ACPDirectories.parse(params.cwd, params.additionalDirectories)
       const mcpServers = yield* supportedMcpServers(params.mcpServers)
-      const session = yield* getSession(params.sessionId, params.cwd)
+      const session = yield* getSession(params.sessionId, params.cwd, { restore: true })
       yield* ACPDirectories.activate(input.client, session, directories)
       const attachment = yield* input.sessions.attach(session, session.location.directory, mcpServers)
       return { configOptions: attachment.configOptions }
