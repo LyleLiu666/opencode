@@ -217,6 +217,7 @@ export function DialogSessionList() {
       skipFilter={true}
       current={currentSessionID()}
       focusCurrent={false}
+      preserveSelection
       onFilter={(query) => {
         setFilter(query)
         setSearch(query)

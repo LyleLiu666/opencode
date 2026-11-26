@@ -1,5 +1,6 @@
 import { createStore } from "solid-js/store"
 import { dedupeWith } from "effect/Array"
+import { isDeepEqual } from "remeda"
 import { createSimpleContext } from "./helper"
 import { batch, createMemo, onCleanup } from "solid-js"
 import { useEvent } from "./event"
@@ -654,15 +655,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (state.pending) save()
         })
 
-      const slots = createMemo(() => {
-        const existing = new Set(
-          data.session
-            .list()
-            .filter((x) => x.parentID === undefined)
-            .map((x) => x.id),
-        )
-        return sessionStore.pinned.filter((id) => existing.has(id)).slice(0, 9)
-      })
+      const slots = createMemo(() => sessionStore.pinned.slice(0, 9))
+      let quickSwitchAttempt = 0
 
       function prune(sessionID: string) {
         batch(() => {
@@ -701,10 +695,21 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             save()
           })
         },
-        quickSwitch(slot: number) {
+        async quickSwitch(slot: number) {
+          const attempt = ++quickSwitchAttempt
           const target = slots()[slot - 1]
           if (!target) return
           if (route.data.type === "session" && route.data.sessionID === target) return
+
+          if (!data.session.get(target)) {
+            const origin = { ...route.data }
+            await data.session.sync(target).catch(() => undefined)
+            // A slow lookup must not interrupt a newer shortcut or navigation.
+            if (attempt !== quickSwitchAttempt || slots()[slot - 1] !== target || !isDeepEqual(origin, route.data)) return
+          }
+
+          const session = data.session.get(target)
+          if (!session || session.parentID !== undefined) return
           route.navigate({ type: "session", sessionID: target })
         },
       }
