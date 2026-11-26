@@ -340,7 +340,11 @@ describe("LocationWatcher subscriptions", () => {
             Effect.retry(Schedule.spaced("10 millis")),
           )
           yield* Effect.sleep("10 millis")
-          expect(subscriptions).toEqual([{ path: path.join(directory, ".git", "HEAD"), type: "file" }])
+          expect(subscriptions).toEqual([
+            { path: path.join(directory, ".git", "HEAD"), type: "file" },
+            { path: path.join(directory, ".git", "packed-refs"), type: "file" },
+            { path: path.join(directory, ".git", "refs", "heads"), type: "directory" },
+          ])
         }),
       { vcs: "git", watcher },
     )
@@ -405,10 +409,10 @@ describe("LocationWatcher subscriptions", () => {
             const policy = yield* LocationWatcherPolicy.Service
             const bus = yield* Bus.Service
             yield* Effect.sync(() => subscriptions.length).pipe(
-              Effect.filterOrFail((count) => count === 1),
+              Effect.filterOrFail((count) => count === 3),
               Effect.retry(Schedule.spaced("10 millis")),
             )
-            expect(counts.active).toBe(1)
+            expect(counts.active).toBe(3)
 
             entries.current = [new Document({ type: "document", info: new Info({ watcher: { ignore: [".git"] } }) })]
             yield* ConfigLocationWatcherPlugin.Plugin.effect(
@@ -418,23 +422,23 @@ describe("LocationWatcher subscriptions", () => {
               Effect.filterOrFail((count) => count === 0),
               Effect.retry(Schedule.spaced("10 millis")),
             )
-            expect(counts.released).toBe(1)
+            expect(counts.released).toBe(3)
 
             entries.current = []
             yield* bus.publish(Event.Updated, {})
             yield* Effect.sync(() => subscriptions.length).pipe(
-              Effect.filterOrFail((count) => count === 2),
+              Effect.filterOrFail((count) => count === 6),
               Effect.retry(Schedule.spaced("10 millis")),
             )
-            expect(counts.active).toBe(1)
+            expect(counts.active).toBe(3)
 
             yield* policy.reload()
-            expect(subscriptions).toHaveLength(2)
+            expect(subscriptions).toHaveLength(6)
           }),
         { vcs: "git", watcher, config },
       )
       expect(counts.active).toBe(0)
-      expect(counts.released).toBe(2)
+      expect(counts.released).toBe(6)
     })
   })
 
@@ -650,6 +654,53 @@ describeNative("LocationWatcher", () => {
         }),
       { vcs: "git" },
     ),
+  )
+
+  it.live("publishes the current branch ref change after an external Git commit", () =>
+    withTmp(
+      (directory) =>
+        Effect.gen(function* () {
+          const head = path.join(directory, ".git", "HEAD")
+          const ref = (yield* Effect.promise(() => $`git symbolic-ref HEAD`.cwd(directory).text())).trim()
+          const branch = path.join(directory, ".git", ref)
+          yield* ready(head)
+          expect(
+            yield* nextUpdate(
+              (event) => event.file === branch,
+              Effect.promise(() => $`git commit --allow-empty -m external`.cwd(directory).quiet()),
+            ),
+          ).toMatchObject({ file: branch })
+        }),
+      { vcs: "git" },
+    ),
+  )
+
+  it.live("publishes commits in linked worktrees on packed, nested Git branches", () =>
+    Effect.gen(function* () {
+      const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir()))
+      const linked = path.join(tmp.path, "linked")
+      const store = path.join(tmp.path, ".git")
+      const ref = path.join(store, "refs", "heads", "feature", "review")
+      yield* Effect.promise(async () => {
+        await initRepo(tmp.path)
+        await $`git worktree add -b feature/review linked`.cwd(tmp.path).quiet()
+        await $`git pack-refs --all --prune`.cwd(tmp.path).quiet()
+      })
+      yield* Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const gitDirectory = (yield* Effect.promise(() =>
+          $`git rev-parse --absolute-git-dir`.cwd(linked).text(),
+        )).trim()
+        expect(yield* fs.exists(ref)).toBe(false)
+        yield* ready(path.join(yield* fs.realPath(gitDirectory), "HEAD"))
+        expect(
+          yield* nextUpdate(
+            (event) => event.file === ref,
+            Effect.promise(() => $`git commit --allow-empty -m linked`.cwd(linked).quiet()),
+          ),
+        ).toMatchObject({ file: ref })
+      }).pipe(provide(linked, { type: "git", store: AbsolutePath.make(store) }))
+    }),
   )
 
   const describeSymlink = process.platform !== "win32" ? describe : describe.skip

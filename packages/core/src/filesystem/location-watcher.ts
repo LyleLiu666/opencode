@@ -33,9 +33,19 @@ const layer = Layer.effect(
     const target = yield* Effect.cached(
       Effect.gen(function* () {
         if (location.vcs?.type === "git") {
-          const resolved = (yield* git.repo.discover(location.directory))?.gitDirectory
-          const vcs = resolved ? yield* fs.realPath(resolved).pipe(Effect.orElseSucceed(() => resolved)) : undefined
-          if (vcs) return { path: path.join(vcs, "HEAD"), aliases: [".git", vcs, ...(resolved ? [resolved] : [])] }
+          const repo = yield* git.repo.discover(location.directory)
+          if (repo) {
+            const directory = yield* fs.realPath(repo.gitDirectory).pipe(Effect.orElseSucceed(() => repo.gitDirectory))
+            const common =
+              repo.commonDirectory === repo.gitDirectory
+                ? directory
+                : yield* fs.realPath(repo.commonDirectory).pipe(Effect.orElseSucceed(() => repo.commonDirectory))
+            return {
+              path: path.join(directory, "HEAD"),
+              common,
+              aliases: [".git", directory, repo.gitDirectory, common, repo.commonDirectory],
+            }
+          }
         }
         if (location.vcs?.type === "hg") {
           const store = location.vcs.store
@@ -62,12 +72,42 @@ const layer = Layer.effect(
           if (active?.path === next) return
           if (active) yield* Scope.close(active.scope, Exit.void)
           active = undefined
-          if (!next) return
+          if (!next || !resolved) return
           const scope = yield* Scope.make()
           active = { path: next, scope }
           yield* Effect.gen(function* () {
-            const updates = yield* watcher.subscribe({ path: next, type: "file" })
-            yield* Stream.runForEach(updates, publish)
+            const head = yield* watcher.subscribe({ path: next, type: "file" })
+            if (!resolved.common) return yield* Stream.runForEach(head, publish)
+            const reftable = path.join(resolved.common, "reftable")
+            if (yield* fs.isDir(reftable)) {
+              const tables = yield* watcher.subscribe({ path: path.join(reftable, "tables.list"), type: "file" })
+              return yield* Stream.runForEach(Stream.merge(head, tables), publish)
+            }
+            const packed = yield* watcher.subscribe({ path: path.join(resolved.common, "packed-refs"), type: "file" })
+            // Packed or nested refs may not have a loose file yet. Worktrees share this Git directory.
+            const refs = path.join(resolved.common, "refs", "heads")
+            const loose = yield* watcher.subscribe({ path: refs, type: "directory" })
+            yield* Stream.runForEach(
+              Stream.mergeAll(
+                [
+                  head,
+                  packed,
+                  loose.pipe(
+                    Stream.filterEffect((update) =>
+                      fs.readFileStringSafe(next).pipe(
+                        Effect.map((head) => {
+                          const ref = path.relative(refs, update.path).split(path.sep).join("/")
+                          return head?.trim() === `ref: refs/heads/${ref}`
+                        }),
+                        Effect.orElseSucceed(() => false),
+                      ),
+                    ),
+                  ),
+                ],
+                { concurrency: "unbounded" },
+              ),
+              publish,
+            )
           }).pipe(
             Effect.catchCauseIf(
               (cause) => !Cause.hasInterrupts(cause),
