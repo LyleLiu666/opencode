@@ -1,4 +1,4 @@
-import { createEffect, onCleanup } from "solid-js"
+import { createEffect, createMemo, onCleanup } from "solid-js"
 import type { QuoteSource, createComposerQuoteSource } from "@/composer/quote-source"
 import { createQuoteBackground } from "./quote-background"
 
@@ -72,13 +72,19 @@ export function createTimelineQuoteHighlight(input: {
   source: () => ReturnType<typeof createComposerQuoteSource>
   enabled: () => boolean
 }) {
+  // The open quote stays the same while its comment draft changes.
+  const pieces = createMemo(() => {
+    const source = input.source().state
+    const key = source.pending
+
+    return key ? source.sources[key] : undefined
+  })
+
   createEffect(() => {
     const root = input.root()
-    const source = input.source()
-    const key = source.state.pending
-    const pieces = key ? source.state.sources[key] : undefined
+    const selected = pieces()
 
-    if (!root || !input.enabled() || !key || !pieces?.length) return
+    if (!root || !input.enabled() || !selected?.length) return
     const base = typeof Highlight !== "undefined" && CSS.highlights ? new Highlight() : undefined
 
     if (base) {
@@ -105,7 +111,7 @@ export function createTimelineQuoteHighlight(input: {
       const containers = new Map<Element, ReturnType<typeof textNodes>>()
       const ranges: Range[] = []
 
-      pieces.forEach((piece) => {
+      selected.forEach((piece) => {
         const range = resolveQuoteRange(root, piece, containers, (shadow) => {
           if (shadows.has(shadow)) return
           shadows.add(shadow)

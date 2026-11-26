@@ -2244,6 +2244,89 @@ test("a failed direct quote send keeps the popup and comment for retry", async (
   )
 })
 
+test("opens and edits a code quote without forcing the style of each token", async ({ page, browser }) => {
+  const code = "const total = prices.reduce((sum, price) => sum + price, 0) // in USD"
+  const prompts: unknown[] = []
+  await setupTimeline(page, {
+    messages: [userMessage(), assistantMessage([textPart("prt_quote_code", `\`\`\`javascript\n${code}\n\`\`\``)])],
+    onPrompt: ({ body }) => void prompts.push(body),
+  })
+
+  const source = page.locator(`[data-timeline-part-id="${renderedPartID("prt_quote_code")}"] pre code`)
+  await expect(source).toHaveText(code)
+  // Highlighted code has separate inline elements for its tokens.
+  await expect.poll(() => source.locator("span").count()).toBeGreaterThan(15)
+  await selectQuoteText(source)
+
+  const quote = page
+    .getByRole("toolbar", { name: "Quote selection" })
+    .getByRole("button", { name: "Quote", exact: true })
+
+  const popup = page.locator('[data-component="composer-quote-comment"]')
+  const comment = popup.locator("textarea")
+  await expect(quote).toBeVisible()
+
+  await browser.startTracing(page, {
+    categories: ["devtools.timeline", "disabled-by-default-devtools.timeline.stack"],
+  })
+  await quote.click()
+  await expect(comment).toBeFocused()
+  await page.keyboard.type("What is")
+  await expect(comment).toHaveValue("What is")
+  const trace: { traceEvents: QuoteTraceEvent[] } = JSON.parse((await browser.stopTracing()).toString())
+
+  const click = forcedQuoteStyles(trace.traceEvents, "click")
+  const typing = forcedQuoteStyles(trace.traceEvents, "input")
+  expect(click).toHaveLength(1)
+  expect(typing).toHaveLength("What is".length)
+  // A small number of passes is normal when mounting and autosizing the comment. The old code forced one per token.
+  expect(Math.max(...click, ...typing)).toBeLessThanOrEqual(10)
+
+  await expect(popup.locator('[data-slot="line-comment-v2-preview"]')).toHaveText(code)
+  await comment.press("Enter")
+  await expect(popup).toHaveCount(0)
+  await page.locator('[data-component="composer-editor"]').press("Enter")
+  await expect
+    .poll(() => prompts)
+    .toEqual([
+      expect.objectContaining({
+        text: `> ${code}\n\nWhat is`,
+        metadata: expect.objectContaining({ comments: [{ type: "quote", text: code, comment: "What is" }] }),
+      }),
+    ])
+})
+
+type QuoteTraceEvent = {
+  name: string
+  ph: string
+  ts: number
+  dur?: number
+  pid: number
+  tid: number
+  args?: { data?: { type?: string }; beginData?: { stackTrace?: unknown[] } }
+}
+
+function forcedQuoteStyles(events: QuoteTraceEvent[], type: "click" | "input") {
+  const styles = events.filter(
+    (event) => event.name === "UpdateLayoutTree" && event.ph === "X" && event.args?.beginData?.stackTrace?.length,
+  )
+
+  return events
+    .values()
+    .filter((event) => event.name === "EventDispatch" && event.ph === "X" && event.args?.data?.type === type)
+    .map(
+      (event) =>
+        styles.filter(
+          (style) =>
+            style.pid === event.pid &&
+            style.tid === event.tid &&
+            style.ts >= event.ts &&
+            style.ts < event.ts + (event.dur ?? 0),
+        ).length,
+    )
+    .toArray()
+}
+
 test("highlights the exact duplicate passage whenever its quote comment is open", async ({ page }) => {
   let reject = true
   await setupTimeline(page, {

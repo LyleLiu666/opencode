@@ -66,23 +66,21 @@ export function createQuoteBackground() {
         while (walker.nextNode()) visit(walker.currentNode)
       })
 
-      hosts.forEach((_host, parent) => {
-        if (!lines.has(parent)) remove(parent)
-      })
-      lines.forEach((_rects, parent) => {
-        const existing = hosts.get(parent)
+      // Read position before changing any classes, so each new token doesn't force its own style pass.
+      const newHosts = [...lines.keys()].flatMap((parent) =>
+        hosts.has(parent) ? [] : [{ parent, relative: style(parent).position === "static" }],
+      )
+
+      hosts.forEach((host, parent) => {
+        if (!lines.has(parent)) return remove(parent)
 
         // A renderer can replace a retained element's textContent, removing its background child.
-        if (existing) {
-          if (existing.layer.parentElement !== parent) parent.append(existing.layer)
-
-          return
-        }
-
+        if (host.layer.parentElement !== parent) parent.append(host.layer)
+      })
+      newHosts.forEach(({ parent, relative }) => {
         const layer = document.createElement("span")
         layer.dataset.component = "timeline-quote-background"
         layer.setAttribute("aria-hidden", "true")
-        const relative = style(parent).position === "static"
         parent.classList.add("timeline-quote-highlight-host")
 
         if (relative) parent.classList.add("timeline-quote-highlight-relative")
