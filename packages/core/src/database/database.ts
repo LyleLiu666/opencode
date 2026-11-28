@@ -1,5 +1,6 @@
 export * as Database from "./database.js"
 
+import { sql } from "drizzle-orm"
 import { EffectDrizzleSqlite } from "./drizzle.js"
 import { sqliteLayer, supportsForeignKeyToggle, supportsTuningPragmas } from "#sqlite"
 import { Context, Effect, Layer, Schema, Semaphore } from "effect"
@@ -9,6 +10,7 @@ import { closeSync, existsSync, openSync } from "node:fs"
 import { chmod } from "node:fs/promises"
 import { isAbsolute, join } from "path"
 import { DatabaseMigration } from "./migration.js"
+import { openExecutionOwner, type ExecutionOwner } from "./execution-owner.js"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 
 const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
@@ -16,6 +18,7 @@ type DatabaseShape = Effect.Success<typeof makeDatabase>
 
 export interface Interface {
   db: DatabaseShape
+  owner?: ExecutionOwner
 }
 
 export const Options = Schema.Struct({
@@ -32,7 +35,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/st
 // cross-object I/O.
 // Only a database file the user opens imports their legacy auth.json; in-memory and injected databases belong to
 // embedders and tests, which must not pick up the user's credentials.
-const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>, legacyCredentials = false) =>
+const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>, filename?: string) =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
@@ -49,9 +52,24 @@ const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>, legacyCredentia
       // Durable Object SQLite always enforces foreign keys and rejects the pragma.
       if (supportsForeignKeyToggle && !durableObject) yield* db.run("PRAGMA foreign_keys = ON")
       const semaphore = yield* lock
-      yield* semaphore.withPermit(DatabaseMigration.apply(db, { legacyCredentials }))
+      yield* semaphore.withPermit(DatabaseMigration.apply(db, { legacyCredentials: filename !== undefined }))
 
-      return { db }
+      const owner = filename
+        ? yield* openExecutionOwner(filename, (id) =>
+            db
+              .get<{ used: number }>(
+                sql`SELECT EXISTS (
+              SELECT 1 FROM session_v2 WHERE execution_owner = ${id}
+              UNION ALL SELECT 1 FROM job WHERE execution_owner = ${id}
+            ) AS used`,
+              )
+              .pipe(
+                Effect.map((row) => row?.used === 1),
+                Effect.orDie,
+              ),
+          )
+        : undefined
+      return { db, owner }
     }).pipe(Effect.orDie),
   )
 
@@ -73,7 +91,7 @@ export function layer(options: Options = { path: ":memory:" }) {
       const provide = (filename: string) =>
         (filename === ":memory:"
           ? databaseLayer(Semaphore.make(1))
-          : databaseLayer(Effect.succeed(lockFor(filename)), true)
+          : databaseLayer(Effect.succeed(lockFor(filename)), filename)
         ).pipe(Layer.provide(sqliteLayer({ filename })))
       const filename = options.path ?? ":memory:"
       if (filename === ":memory:") return provide(filename)

@@ -73,6 +73,8 @@ const session = (
   time_compacting: 3,
   time_archived: null,
   time_suspended: null,
+  execution_owner: null,
+  execution_generation: null,
   resume_attempts: 0,
   ...overrides,
 })

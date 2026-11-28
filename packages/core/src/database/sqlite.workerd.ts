@@ -1,3 +1,4 @@
+import type { ExecutionMarker } from "./execution-owner.js"
 import { Context, Effect, Exit, Layer, Semaphore, Stream } from "effect"
 import { Reactivity } from "effect/reactivity"
 import { SqlClient, Statement } from "effect/sql"
@@ -225,3 +226,7 @@ export const sqliteLayer = (config: Config): Layer.Layer<SqlClient.SqlClient> =>
 
 // Durable Object SQLite throws a plain Error without SQLite result codes.
 export const resultCode = (_cause: unknown): number | undefined => undefined
+
+export function openExecutionMarker(_filename: string, _create: boolean): ExecutionMarker {
+  throw new Error("Filesystem execution ownership is unavailable in this runtime")
+}

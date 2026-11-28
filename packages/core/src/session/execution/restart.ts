@@ -70,13 +70,9 @@ export interface Interface {
  * Recovery is at-least-once: local coordination prevents concurrent drains,
  * not repeated external side effects after a crash.
  *
- * The sweep assumes every orphaned claim's owner is dead. The managed-server
- * protocol guarantees this: a successor is only spawned after the previous
- * process is confirmed dead (client service `kill`/`evict` poll the PID), the
- * registration lock admits one managed server at a time, and unregistered
- * servers sharing the database never sweep. The service is inert until called
- * — the managed server invokes it at boot; embedders may call it from their
- * own start-up.
+ * Filesystem databases prove the previous owner departed and transfer the claim before resuming.
+ * In-memory and injected databases rely on their runtime to provide a single execution owner.
+ * This service is inert until called by the managed server or an embedder.
  */
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionRestart") {}
 
@@ -90,7 +86,7 @@ export const layer = (options?: Options) =>
       const jobs = yield* Job.Service
       const sessions = yield* Session.Service
       const instances = yield* Instance.Service
-      const db = (yield* Database.Service).db
+      const { db, owner } = yield* Database.Service
       const scope = yield* Effect.scope
       const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
 
@@ -428,14 +424,19 @@ export const layer = (options?: Options) =>
       return Service.of({
         resumeSuspendedSessions: Effect.gen(function* () {
           const active = yield* execution.active
-          const pending = yield* jobs.pendingBackground
+          const rows = yield* jobs.pendingBackground
           const children = new Set(
-            pending.flatMap((background) =>
+            rows.flatMap((background) =>
               background.status === "running" && background.recovery.kind === "subagent"
                 ? [background.recovery.childSessionID]
                 : [],
             ),
           )
+          const pending = yield* Effect.filter(rows, (background) => {
+            if (background.recovery.kind !== "subagent") return Effect.succeed(true)
+            if (active.has(background.recovery.childSessionID)) return Effect.succeed(false)
+            return store.recoverSubagent(background)
+          })
           yield* store.releaseOrphanedChildClaims()
           // Job.cancel persists the cancellation before interrupting the execution. A crash
           // in between leaves its claim behind. Settlement writes an error to the
@@ -447,9 +448,20 @@ export const layer = (options?: Options) =>
             }
           }
           // Early notices wait for recovery's accounting, including Sessions that exhaust their budget.
-          const suspended = new Set(
-            [...(yield* store.listSuspended()), ...children].filter((sessionID) => !active.has(sessionID)),
+          const claimed = yield* store.listSuspended()
+          const direct = yield* Effect.filter(
+            claimed.filter((sessionID) => !active.has(sessionID) && !children.has(sessionID)),
+            store.recover,
           )
+          const suspended = new Set([...claimed, ...children].filter((sessionID) => !active.has(sessionID)))
+          const owned = new Set([
+            ...direct,
+            ...pending.flatMap((background) =>
+              background.status === "running" && background.recovery.kind === "subagent"
+                ? [background.recovery.childSessionID]
+                : [],
+            ),
+          ])
           const state = { defer: true }
           const wakes = new Set<SessionSchema.ID>()
           yield* Effect.addFinalizer(() =>
@@ -491,7 +503,7 @@ export const layer = (options?: Options) =>
             { discard: true },
           )
           yield* Effect.forEach(
-            suspended,
+            owned,
             (sessionID) =>
               settleBackgroundedCalls(sessionID, notices, reattached).pipe(
                 Effect.catch((error) =>
@@ -514,13 +526,17 @@ export const layer = (options?: Options) =>
           // A directly driven child can also settle and wake its parent. Account for every
           // claimed execution before starting any of them, leaving running jobs to SubagentJob.
           const resumed = yield* execution.active
-          const direct = yield* Effect.filter(
-            (yield* store.listSuspended()).filter((sessionID) => !resumed.has(sessionID) && !children.has(sessionID)),
+          const directResumes = yield* Effect.filter(
+            direct.filter((sessionID) => !resumed.has(sessionID)),
             Effect.fnUntraced(function* (sessionID) {
               // Code Mode scripts do not suspend/resume yet, so an agent() child whose script died on restart has
               // nobody awaiting it; release its claim instead of reviving an orphan run.
               const session = yield* store.get(sessionID)
-              if (session && CodeModeAgents.sessionMarker(session.id, session.metadata) !== undefined) {
+              if (
+                session &&
+                (CodeModeAgents.sessionMarker(session.id, session.metadata) !== undefined ||
+                  (session.parentID && !(yield* store.get(session.parentID))))
+              ) {
                 suspended.delete(sessionID)
                 yield* store.release(sessionID)
                 return false
@@ -529,7 +545,7 @@ export const layer = (options?: Options) =>
             }),
           )
           yield* Effect.forEach(
-            direct,
+            directResumes,
             Effect.fnUntraced(function* (sessionID) {
               suspended.delete(sessionID)
               yield* execution.resume(sessionID).pipe(Effect.ignore, Effect.forkIn(scope))
@@ -548,7 +564,7 @@ export const layer = (options?: Options) =>
             }),
             { discard: true },
           )
-        }).pipe(Effect.scoped),
+        }).pipe(Effect.scoped, Effect.ensuring(owner?.pruneDeparted ?? Effect.void)),
       })
     }),
   )

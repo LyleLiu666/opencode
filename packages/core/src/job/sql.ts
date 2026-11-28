@@ -14,6 +14,7 @@ export const JobTable = sqliteTable(
     kind: text().notNull(),
     title: text(),
     status: text().$type<Job.Status>().notNull(),
+    execution_owner: text(),
     output: text(),
     error: text(),
     recovery: text({ mode: "json" }).$type<Job.Recovery>().notNull(),

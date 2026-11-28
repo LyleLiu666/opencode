@@ -58,6 +58,7 @@ type Execution<E, Reason> = {
  */
 export const make = <Key, E, Reason = never>(options: {
   readonly drain: (key: Key, force: boolean, scope: Promotable) => Effect.Effect<void, E>
+  readonly admit?: (key: Key) => Effect.Effect<boolean>
   /** Runs once when a process-local busy period begins, before its first drain. */
   readonly started?: (key: Key) => Effect.Effect<void>
   /**
@@ -93,14 +94,35 @@ export const make = <Key, E, Reason = never>(options: {
       // The leading yield lets `owner` be assigned before the drain can settle, and keeps
       // failing self-waking executions from growing the stack across successor starts.
       // Drains start one tick after wake; callers observe progress through events or run.
+      let rejected = false
       execution.owner = fork(
         Effect.yieldNow.pipe(
-          Effect.andThen(Effect.uninterruptible(options.started?.(key) ?? Effect.void)),
-          Effect.andThen(loop(key, execution, force)),
+          Effect.andThen(
+            Effect.uninterruptible(
+              (options.admit?.(key) ?? Effect.succeed(true)).pipe(
+                Effect.map((admitted) => {
+                  rejected = !admitted
+                  if (rejected) execution.pendingWake = undefined
+                  return admitted
+                }),
+              ),
+            ),
+          ),
+          Effect.flatMap((admitted) =>
+            admitted
+              ? Effect.uninterruptible(options.started?.(key) ?? Effect.void).pipe(
+                  Effect.andThen(loop(key, execution, force)),
+                )
+              : Effect.void,
+          ),
           Effect.onExit((exit) =>
             Effect.sync(() => {
               execution.owner = undefined
-            }).pipe(Effect.andThen(options.settled?.(key, exit, execution.interruptionReason) ?? Effect.void)),
+            }).pipe(
+              Effect.andThen(() =>
+                rejected ? Effect.void : (options.settled?.(key, exit, execution.interruptionReason) ?? Effect.void),
+              ),
+            ),
           ),
           Effect.onExit((exit) => Effect.sync(() => settle(key, execution, exit))),
           Effect.exit,

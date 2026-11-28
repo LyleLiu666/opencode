@@ -1,6 +1,6 @@
 export * as Job from "./job.js"
 
-import { asc, eq, or } from "drizzle-orm"
+import { and, asc, eq, ne, or } from "drizzle-orm"
 import {
   Array,
   Cause,
@@ -38,6 +38,7 @@ const Background = Schema.Struct({
   id: Schema.String,
   notificationID: SessionMessage.ID,
   recovery: RecoverySchema,
+  executionOwner: Schema.optionalKey(Schema.String),
   status: Schema.Literals(["running", "completed", "error", "cancelled"]),
   output: Schema.optionalKey(Schema.String),
   error: Schema.optionalKey(Schema.String),
@@ -247,7 +248,7 @@ function decrementSession(input: Map<SessionSchema.ID, number>, sessionID: Sessi
  * backgrounded work until its completion notification is admitted.
  */
 export const make = Effect.gen(function* () {
-  const db = (yield* Database.Service).db
+  const { db, owner } = yield* Database.Service
   const state: State = {
     jobs: yield* SynchronizedRef.make(new Map()),
     generations: yield* Ref.make(0),
@@ -284,6 +285,7 @@ export const make = Effect.gen(function* () {
       kind: job.recovery.kind,
       title: recoveryTitle(job, job.recovery),
       status: job.info.status,
+      execution_owner: job.recovery.kind === "subagent" ? owner?.id : undefined,
       output: job.info.output ?? null,
       error: job.info.error ?? null,
       recovery: job.recovery,
@@ -295,6 +297,7 @@ export const make = Effect.gen(function* () {
       .values(values)
       .onConflictDoUpdate({
         target: JobTable.notification_id,
+        setWhere: values.execution_owner ? eq(JobTable.execution_owner, values.execution_owner) : undefined,
         set: {
           status: values.status,
           output: values.output,
@@ -594,6 +597,8 @@ export const make = Effect.gen(function* () {
 
   const cancel: Interface["cancel"] = Effect.fn("Job.cancel")((id) => cancelInternal(id, true))
 
+  const ownedBackground = owner ? or(ne(JobTable.kind, "subagent"), eq(JobTable.execution_owner, owner.id)) : undefined
+
   const cancelSession: Interface["cancelSession"] = Effect.fn("Job.cancelSession")(function* (sessionID) {
     const ids = [...(yield* SynchronizedRef.get(state.jobs)).values()]
       .filter((job) => job.info.status === "running" && matchesSession(job, sessionID))
@@ -601,7 +606,7 @@ export const make = Effect.gen(function* () {
     const cancelled = yield* Effect.forEach(ids, (id) => cancelInternal(id, false))
     yield* db
       .delete(JobTable)
-      .where(or(eq(JobTable.session_id, sessionID), eq(JobTable.child_session_id, sessionID)))
+      .where(and(ownedBackground, or(eq(JobTable.session_id, sessionID), eq(JobTable.child_session_id, sessionID))))
       .run()
       .pipe(Effect.orDie)
     yield* SynchronizedRef.update(state.jobs, (jobs) => {
@@ -627,6 +632,7 @@ export const make = Effect.gen(function* () {
         notificationID: row.notification_id,
         recovery: row.recovery,
         status: row.status,
+        ...(row.execution_owner ? { executionOwner: row.execution_owner } : {}),
         ...(row.output !== null ? { output: row.output } : {}),
         ...(row.error !== null ? { error: row.error } : {}),
       }),
@@ -644,10 +650,13 @@ export const make = Effect.gen(function* () {
     Effect.withSpan("Job.runningBackground"),
   )
 
+  const backgroundRow = (notificationID: SessionMessage.ID) =>
+    and(eq(JobTable.notification_id, notificationID), ownedBackground)
+
   const completeBackground: Interface["completeBackground"] = Effect.fn("Job.completeBackground")((notificationID) =>
     SynchronizedRef.updateEffect(state.jobs, (jobs) =>
       Effect.gen(function* () {
-        yield* db.delete(JobTable).where(eq(JobTable.notification_id, notificationID)).run().pipe(Effect.orDie)
+        yield* db.delete(JobTable).where(backgroundRow(notificationID)).run().pipe(Effect.orDie)
         const entry = [...jobs].find(([, job]) => job.info.notificationID === notificationID)
         if (!entry) return jobs
         // Still-running work keeps its entry, but must not persist its row again when it settles.
@@ -714,6 +723,7 @@ export const make = Effect.gen(function* () {
           session_id: report.recovery.parentSessionID,
           child_session_id: report.recovery.childSessionID,
           kind: "subagent",
+          execution_owner: owner?.id,
           title: report.recovery.description,
           status: report.status,
           output: report.output ?? null,
@@ -724,6 +734,7 @@ export const make = Effect.gen(function* () {
         })
         .onConflictDoUpdate({
           target: JobTable.notification_id,
+          setWhere: owner ? eq(JobTable.execution_owner, owner.id) : undefined,
           set: {
             status: report.status,
             output: report.output ?? null,
@@ -738,7 +749,7 @@ export const make = Effect.gen(function* () {
   )
 
   const deleteBackgroundRow: Interface["deleteBackgroundRow"] = Effect.fn("Job.deleteBackgroundRow")((notificationID) =>
-    db.delete(JobTable).where(eq(JobTable.notification_id, notificationID)).run().pipe(Effect.orDie, Effect.asVoid),
+    db.delete(JobTable).where(backgroundRow(notificationID)).run().pipe(Effect.orDie, Effect.asVoid),
   )
 
   return Service.of({

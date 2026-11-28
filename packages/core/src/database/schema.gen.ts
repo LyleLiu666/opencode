@@ -103,6 +103,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`kind\` text NOT NULL,
           \`title\` text,
           \`status\` text NOT NULL,
+          \`execution_owner\` text,
           \`output\` text,
           \`error\` text,
           \`recovery\` text NOT NULL,
@@ -292,6 +293,8 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`time_compacting\` integer,
           \`time_archived\` integer,
           \`time_suspended\` integer,
+          \`execution_owner\` text,
+          \`execution_generation\` text,
           \`resume_attempts\` integer DEFAULT 0 NOT NULL,
           CONSTRAINT \`fk_session_v2_project_id_project_id_fk\` FOREIGN KEY (\`project_id\`) REFERENCES \`project\`(\`id\`) ON DELETE CASCADE
         );

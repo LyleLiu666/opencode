@@ -3,13 +3,15 @@ export * as SubagentJob from "./subagent-job.js"
 import { Context, Effect, Layer } from "effect"
 import { Node } from "@opencode/util/effect/app-node"
 import type { LayerNode } from "@opencode/util/effect/layer-node"
+import { Database } from "../database/database.js"
 import { Job } from "../job.js"
+import { SessionStore } from "./store.js"
 import { SessionExecution } from "./execution.js"
 
 type Recovery = Extract<Job.Recovery, { kind: "subagent" }>
 
 export interface Interface {
-  readonly start: (recovery: Recovery) => Effect.Effect<Job.Info>
+  readonly start: (recovery: Recovery) => Effect.Effect<Job.Info | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SubagentJob") {}
@@ -43,12 +45,20 @@ export function start(
 const make = Effect.gen(function* () {
   const execution = yield* SessionExecution.Service
   const jobs = yield* Job.Service
+  const store = yield* SessionStore.Service
+  const { owner } = yield* Database.Service
   // Jobs outlive the plugin that launched them. Fork with the global context too, rather
   // than retaining the caller's location.
   const context = yield* Effect.context<never>()
 
   return Service.of({
-    start: (recovery) => start(jobs, execution, recovery).pipe(Effect.setContext(context)),
+    start: (recovery) =>
+      Effect.gen(function* () {
+        // The input is already durable. An existing remote drain can consume it;
+        // this server must not create a competing job for the same child.
+        if (owner && !(yield* store.claim(recovery.childSessionID))) return undefined
+        return yield* start(jobs, execution, recovery)
+      }).pipe(Effect.uninterruptible, Effect.setContext(context)),
   })
 })
 
@@ -57,5 +67,5 @@ export const layer = Layer.effect(Service, make)
 export const node: LayerNode.Provider<Service, never, typeof Node.tags.values.global> = Node.makeGlobalNode({
   service: Service,
   layer,
-  deps: [SessionExecution.node, Job.node],
+  deps: [SessionExecution.node, Job.node, SessionStore.node, Database.node],
 })

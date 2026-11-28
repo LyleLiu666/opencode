@@ -63,7 +63,7 @@ export const layer = Layer.effect(
     const jobs = yield* Job.Service
     const inbox = yield* SessionInbox.Service
     const scope = yield* Effect.scope
-    const db = (yield* Database.Service).db
+    const { db, owner } = yield* Database.Service
     const reportLifecycle = <A>(sessionID: SessionSchema.ID, effect: Effect.Effect<A>) =>
       effect.pipe(
         Effect.tapCause((cause) =>
@@ -81,7 +81,7 @@ export const layer = Layer.effect(
     // terminal is the signature of a process that died without teardown (crash, SIGKILL, eviction);
     // recovery is a property of the database, never of a shutdown hook that may not run.
     const claimOnCommit = (sessionID: SessionSchema.ID) => ({
-      commit: () => store.claim(sessionID),
+      commit: () => store.claim(sessionID).pipe(Effect.asVoid),
     })
     // The report coordinator is built first so the run coordinator's hooks can use it, while its
     // wake and draining dependencies bind late to the coordinator the hooks belong to.
@@ -132,6 +132,7 @@ export const layer = Layer.effect(
       })
     })
     const coordinator = yield* SessionRunCoordinator.make<SessionSchema.ID, SessionRunner.RunError, InterruptReason>({
+      admit: owner ? store.claim : undefined,
       started: (sessionID) =>
         reportLifecycle(
           sessionID,
@@ -139,7 +140,11 @@ export const layer = Layer.effect(
             // Bind before the started publication yields to SQLite so a cancel arriving during
             // that window still matches this generation.
             const before = yield* jobs.currentGeneration(sessionID)
-            const event = yield* bus.publish(SessionEvent.Execution.Started, { sessionID }, claimOnCommit(sessionID))
+            const event = yield* bus.publish(
+              SessionEvent.Execution.Started,
+              { sessionID },
+              owner ? undefined : claimOnCommit(sessionID),
+            )
             const bound = before?.running ? before : yield* jobs.currentGeneration(sessionID)
             subagentReport.started(sessionID, {
               startedSeq: event.durable.seq,
@@ -153,6 +158,7 @@ export const layer = Layer.effect(
         reportLifecycle(
           sessionID,
           Effect.gen(function* () {
+            if (owner && !(yield* store.owns(sessionID))) return
             const outcome = terminal(exit, reason)
             if (outcome.type === "interrupted" && outcome.reason === "shutdown") {
               subagentReport.clear(sessionID)
