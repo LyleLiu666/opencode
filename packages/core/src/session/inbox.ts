@@ -1,6 +1,6 @@
 export * as SessionInbox from "./inbox.js"
 
-import { and, asc, eq, or } from "drizzle-orm"
+import { and, asc, eq, ne, or } from "drizzle-orm"
 import { Array, Context, DateTime, Effect, Layer, Schema } from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import {
@@ -27,7 +27,7 @@ import { SessionBlob } from "./blob.js"
 import { SessionMessage } from "./message.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStored } from "./stored.js"
-import { SessionInboxTable, SessionMessageTable } from "./sql.js"
+import { SessionInboxTable, SessionMessageTable, SessionTable } from "./sql.js"
 import { SessionHistory } from "./history.js"
 
 type DatabaseService = Database.Interface["db"]
@@ -172,8 +172,7 @@ export type Interface = Effect.Success<ReturnType<typeof make>>
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionInbox") {}
 
 export const make = Effect.fn("SessionInbox.make")(function* () {
-  const database = yield* Database.Service
-  const db = database.db
+  const { db, owner } = yield* Database.Service
   const bus = yield* Bus.Service
   const locks = KeyedMutex.makeUnsafe<SessionSchema.ID>()
 
@@ -206,15 +205,16 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     readonly id: SessionMessage.ID
     readonly sessionID: SessionSchema.ID
     readonly item: Item & { readonly type: Type }
+    readonly wake?: boolean
   }) {
     const existing = yield* reconcile({ ...request, type: request.item.type, delivery: request.item.delivery })
     if (existing !== undefined) return existing
     const admitted = yield* bus
-      .publish(SessionEvent.InboxEnqueued, {
-        inboxID: request.id,
-        sessionID: request.sessionID,
-        item: request.item,
-      })
+      .publish(
+        SessionEvent.InboxEnqueued,
+        { inboxID: request.id, sessionID: request.sessionID, item: request.item },
+        request.wake && owner ? { commit: () => recordForeignWake(owner.id, request) } : undefined,
+      )
       .pipe(
         Effect.map((event) =>
           Info.make({
@@ -235,6 +235,49 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     if (!matches(admitted, { ...request, type: request.item.type }))
       return yield* new LifecycleConflict({ id: request.id })
     return admitted
+  })
+
+  // A peer cannot ring the owner's in-memory doorbell. Record the request on the
+  // pending row under the same SQLite write transaction as admission.
+  const recordForeignWake = Effect.fnUntraced(function* (ownerID: string, request: PendingRef) {
+    const generation = yield* db
+      .select({ generation: SessionTable.execution_generation })
+      .from(SessionTable)
+      .where(and(eq(SessionTable.id, request.sessionID), ne(SessionTable.execution_owner, ownerID)))
+      .get()
+      .pipe(Effect.orDie)
+    if (!generation?.generation) return
+    yield* db
+      .update(SessionInboxTable)
+      .set({ wake_after_generation: generation.generation })
+      .where(eq(SessionInboxTable.id, request.id))
+      .run()
+      .pipe(Effect.orDie)
+  })
+
+  // Called inside the terminal commit, before releasing this execution's claim.
+  const takeForeignWake = Effect.fn("SessionInbox.takeForeignWake")(function* (sessionID: SessionSchema.ID) {
+    if (!owner) return false
+    const generation = yield* db
+      .select({ generation: SessionTable.execution_generation })
+      .from(SessionTable)
+      .where(and(eq(SessionTable.id, sessionID), eq(SessionTable.execution_owner, owner.id)))
+      .get()
+      .pipe(Effect.orDie)
+    if (!generation?.generation) return false
+    const updated = yield* db
+      .update(SessionInboxTable)
+      .set({ wake_after_generation: null })
+      .where(
+        and(
+          eq(SessionInboxTable.session_id, sessionID),
+          eq(SessionInboxTable.wake_after_generation, generation.generation),
+        ),
+      )
+      .returning({ id: SessionInboxTable.id })
+      .get()
+      .pipe(Effect.orDie)
+    return updated !== undefined
   })
 
   const admitCompaction = Effect.fn("SessionInbox.admitCompaction")(function* (input: {
@@ -311,6 +354,7 @@ export const make = Effect.fn("SessionInbox.make")(function* () {
     promote,
     reconcile,
     admit,
+    takeForeignWake,
     admitCompaction,
     cancel,
     steer,

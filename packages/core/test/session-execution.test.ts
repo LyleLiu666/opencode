@@ -1,4 +1,5 @@
 import type { FileSystem } from "@opencode/core/filesystem"
+import path from "node:path"
 import { describe, expect, test } from "bun:test"
 import { AIError, TransportError } from "@opencode/ai/effect"
 import { Money } from "@opencode/schema/money"
@@ -32,6 +33,7 @@ import { VideoID } from "@opencode/schema/generate"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { tmpdirScoped } from "./fixture/tmpdir"
+import { offlineModels } from "./fixture/models"
 import { Agent } from "@opencode/core/agent"
 import { ID } from "@opencode/core/model"
 import { Provider } from "@opencode/core/provider"
@@ -65,6 +67,65 @@ describe("SessionExecution lifecycle", () => {
     expect(SessionExecution.terminal(interrupted)).toEqual({ type: "interrupted", reason: "shutdown" })
     expect(SessionExecution.terminal(interrupted, "user")).toEqual({ type: "interrupted", reason: "user" })
   })
+
+  for (const resume of [true, false]) {
+    it.live(`leaves a peer prompt with resume=${resume} in its requested state after the last inbox check`, () =>
+      Effect.gen(function* () {
+        const temp = yield* tmpdirScoped()
+        const scope = yield* Scope.fork(yield* Scope.Scope)
+        const graph = AppNodeBuilder.build(
+          LayerNode.group([
+            Database.node,
+            Bus.node,
+            SessionStore.node,
+            SessionInbox.node,
+            Job.node,
+            Session.node,
+            SessionExecution.node,
+          ]),
+          [Database.node.replace(Database.configured({ path: path.join(temp.path, "shared.sqlite") })), offlineModels],
+        )
+        const owner = yield* Layer.buildWithScope(Layer.fresh(graph), scope)
+        const peer = yield* Layer.buildWithScope(Layer.fresh(graph), scope)
+        const session = yield* Context.get(peer, Session.Service).create({
+          location: { directory: AbsolutePath.make(temp.path) },
+        })
+        const database = Context.get(owner, Database.Service)
+        const checked = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        let drains = 0
+        const services = yield* buildExecution(scope, ({ sessionID }) =>
+          Effect.gen(function* () {
+            drains++
+            if (drains > 1) {
+              const inbox = yield* SessionInbox.Service
+              expect(yield* inbox.promote(sessionID, "input")).toBe(1)
+              return
+            }
+            expect(yield* SessionInbox.boundary(database.db, sessionID, "input")).toEqual({ _tag: "Empty" })
+            yield* Deferred.succeed(checked, undefined)
+            yield* Deferred.await(release)
+          }),
+        ).pipe(Effect.provideContext(owner))
+        const execution = Context.get(services, SessionExecution.Service)
+        yield* execution.wake(session.id)
+        yield* Deferred.await(checked)
+        const admitted = yield* Context.get(peer, Session.Service).prompt({
+          sessionID: session.id,
+          text: "from peer",
+          resume,
+        })
+        // The peer has finished its own wake attempt while the owner is held at the last inbox check.
+        yield* Context.get(peer, SessionExecution.Service).awaitIdle(session.id)
+        expect((yield* SessionInbox.find(database.db, admitted.id))?.id).toBe(admitted.id)
+        yield* Deferred.succeed(release, undefined)
+        yield* execution.awaitIdle(session.id)
+        const pending = yield* SessionInbox.find(database.db, admitted.id)
+        expect(pending?.id).toBe(resume ? undefined : admitted.id)
+        expect(drains).toBe(resume ? 2 : 1)
+      }),
+    )
+  }
 
   it.effect("resumes a directly driven child after execution teardown", () =>
     Effect.gen(function* () {

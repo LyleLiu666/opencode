@@ -174,6 +174,7 @@ export const make = Effect.fn("Session.make")(function* () {
                 id: messageID,
                 sessionID: session.id,
                 item,
+                wake: input.resume !== false,
               })
             }).pipe(
               instances.provide(session),
