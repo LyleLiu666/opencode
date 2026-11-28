@@ -29,22 +29,17 @@ it.live("lists background jobs by session, kind, and descendants until completio
     const captured = yield* Deferred.make<Job.Interface>()
     const jobNode = makeGlobalNode({
       service: Job.Service,
-      layer: Layer.effect(
-        Job.Service,
-        Job.make.pipe(Effect.tap((service) => Deferred.succeed(captured, service))),
-      ),
+      layer: Layer.effect(Job.Service, Job.make.pipe(Effect.tap((service) => Deferred.succeed(captured, service)))),
       deps: [Database.node],
     })
-    const handler = yield* ServerFetch.make(
-      {
-        app: { version: "test" },
-        database: { path: path.join(dir, "opencode.db") },
-        config: { directory: global, project: false, claude: false },
-        models: { fetch: false },
-        fs: { filewatcher: false },
-      },
-      { overrides: [Job.node.replace(jobNode)] },
-    )
+    const options = {
+      app: { version: "test" },
+      database: { path: path.join(dir, "opencode.db") },
+      config: { directory: global, project: false, claude: false },
+      models: { fetch: false },
+      fs: { filewatcher: false },
+    }
+    const handler = yield* ServerFetch.make(options, { overrides: [Job.node.replace(jobNode)] })
     const jobs = yield* Deferred.await(captured)
     const api = client(handler)
 
@@ -147,6 +142,18 @@ it.live("lists background jobs by session, kind, and descendants until completio
     // Unfiltered list returns every unconsumed background job on the server.
     const all = yield* Effect.promise(() => api.experimental.job.list())
     expect(all.map((item) => item.id)).toEqual(["sh_root", child.id, "sh_child", "img_other"])
+
+    const peer = yield* ServerFetch.make(options)
+    yield* Effect.promise(async () => {
+      const api = client(peer)
+      await expect(api.experimental.job.cancel({ id: "sh_root" })).rejects.toMatchObject({
+        _tag: "ConflictError",
+        resource: "sh_root",
+        message: expect.stringContaining("server running it"),
+      })
+      await api.experimental.job.cancel({ id: "already-gone" })
+    })
+    expect((yield* jobs.get("sh_root"))?.status).toBe("running")
 
     // Settled background work stays visible as "completed" until completeBackground clears its notice.
     yield* Deferred.succeed(shellGate, "passed")

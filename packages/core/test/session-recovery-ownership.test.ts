@@ -87,14 +87,14 @@ it.live("reserves a suspended subagent and its job for only one recovery process
     expect(entry.executionOwner).toBe(original.database.owner?.id)
 
     expect(yield* first.store.claim(child)).toBe(false)
-    expect(yield* first.store.recoverSubagent(entry)).toBe(false)
+    expect(yield* first.store.recoverBackground(entry)).toBe(false)
     expect(yield* first.jobs.cancel(child)).toBeUndefined()
     expect(yield* first.store.claim(independent)).toBe(true)
     yield* first.store.release(independent)
 
     yield* Scope.close(originalScope, Exit.void)
     expect(existsSync(marker(original.database))).toBe(true)
-    const results = yield* Effect.all([first.store.recoverSubagent(entry), second.store.recoverSubagent(entry)], {
+    const results = yield* Effect.all([first.store.recoverBackground(entry), second.store.recoverBackground(entry)], {
       concurrency: "unbounded",
     })
     expect(results.filter(Boolean)).toHaveLength(1)
@@ -112,7 +112,7 @@ it.live("reserves a suspended subagent and its job for only one recovery process
     yield* winner.store.release(child)
     yield* winner.jobs.completeBackground(entry.notificationID)
     expect(yield* loser.jobs.pendingBackground).toEqual([])
-    expect(yield* loser.store.recoverSubagent(entry)).toBe(false)
+    expect(yield* loser.store.recoverBackground(entry)).toBe(false)
     yield* winner.database.owner?.pruneDeparted ?? Effect.void
     expect(existsSync(marker(original.database))).toBe(false)
     yield* Scope.close(contenders, Exit.void)
@@ -143,12 +143,32 @@ it.live("retains unknown legacy ownership in a shared database", () =>
       })
       .run()
 
+    const shellNotice = SessionMessage.ID.create()
+    yield* local.database.db
+      .insert(JobTable)
+      .values({
+        notification_id: shellNotice,
+        id: "sh_legacy",
+        session_id: child,
+        kind: "shell",
+        status: "running",
+        recovery: { kind: "shell", sessionID: child, shellID: "sh_legacy", command: "echo test" },
+      })
+      .run()
+
     expect(yield* local.store.recover(child)).toBe(false)
-    expect(yield* local.store.recoverSubagent((yield* local.jobs.pendingBackground)[0])).toBe(false)
+    expect(yield* Effect.forEach(yield* local.jobs.pendingBackground, local.store.recoverBackground)).toEqual([
+      false,
+      false,
+    ])
     expect(yield* local.store.claim(child)).toBe(false)
     yield* local.store.release(child)
     yield* local.jobs.completeBackground(id)
+    yield* local.jobs.completeBackground(shellNotice)
     expect(yield* local.store.listSuspended()).toEqual([child])
-    expect((yield* local.jobs.pendingBackground)[0]).toMatchObject({ notificationID: id, status: "running" })
+    expect(yield* local.jobs.pendingBackground).toMatchObject([
+      { notificationID: id, status: "running" },
+      { notificationID: shellNotice, status: "running" },
+    ])
   }),
 )

@@ -1,6 +1,7 @@
 import { Job } from "@opencode/core/job"
 import { Session } from "@opencode/core/session"
 import { SessionBackground } from "@opencode/core/session/background"
+import { ConflictError } from "@opencode/protocol/errors"
 import type { ListQuery } from "@opencode/protocol/groups/job"
 import { Effect, Option } from "effect"
 import { missingSession } from "./session-error"
@@ -23,7 +24,12 @@ export const makeJob = Effect.gen(function* () {
       }
     }),
     cancel: Effect.fn("JobHandler.cancel")(function* (id: string) {
-      yield* jobs.cancel(id)
+      const result = yield* jobs.cancel(id)
+      if (result?.status === "cancelled" || !(yield* jobs.isBackgroundRunning(id))) return
+      return yield* new ConflictError({
+        resource: id,
+        message: "This server cannot stop the background job. Connect to the server running it to stop it.",
+      })
     }),
   }
 })

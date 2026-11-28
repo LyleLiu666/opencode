@@ -7,6 +7,8 @@ import { useTheme } from "../../../context/theme"
 import { Keymap } from "../../../context/keymap"
 import { Locale } from "../../../util/locale"
 import { scriptLabel } from "../../../util/session"
+import { useToast } from "../../../ui/toast"
+import { errorMessage } from "../../../util/error"
 import { useComposerTab } from "./context"
 
 export function ScriptsTab(props: { sessionID: string }) {
@@ -14,6 +16,7 @@ export function ScriptsTab(props: { sessionID: string }) {
   const client = useClient()
   const theme = useTheme()
   const composer = useComposerTab()
+  const toast = useToast()
   const shortcuts = Keymap.useShortcuts()
 
   // Scripts show for the main session only, like desktop.
@@ -112,7 +115,10 @@ export function ScriptsTab(props: { sessionID: string }) {
         group: "Composer",
         run() {
           const job = runningScripts()[store.selected]
-          if (job) void client.api.experimental.job.cancel({ id: job.id })
+          if (job)
+            void client.api.experimental.job
+              .cancel({ id: job.id })
+              .catch((error) => toast.show({ variant: "error", message: errorMessage(error) }))
         },
       },
     ],

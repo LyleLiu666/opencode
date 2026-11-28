@@ -1,6 +1,6 @@
 export * as Job from "./job.js"
 
-import { and, asc, eq, ne, or } from "drizzle-orm"
+import { and, asc, eq, or } from "drizzle-orm"
 import {
   Array,
   Cause,
@@ -176,6 +176,7 @@ export interface Interface {
   readonly backgroundAll: (input: BackgroundAllInput) => Effect.Effect<Info[]>
   readonly cancel: (id: string) => Effect.Effect<Info | undefined>
   readonly cancelSession: (sessionID: SessionSchema.ID) => Effect.Effect<Info[]>
+  readonly isBackgroundRunning: (id: string) => Effect.Effect<boolean>
   readonly pendingBackground: Effect.Effect<readonly Background[]>
   readonly runningBackground: Effect.Effect<readonly Recovery[]>
   readonly backgroundJobs: Effect.Effect<readonly JobList.Item[]>
@@ -285,7 +286,7 @@ export const make = Effect.gen(function* () {
       kind: job.recovery.kind,
       title: recoveryTitle(job, job.recovery),
       status: job.info.status,
-      execution_owner: job.recovery.kind === "subagent" ? owner?.id : undefined,
+      execution_owner: owner?.id,
       output: job.info.output ?? null,
       error: job.info.error ?? null,
       recovery: job.recovery,
@@ -597,7 +598,7 @@ export const make = Effect.gen(function* () {
 
   const cancel: Interface["cancel"] = Effect.fn("Job.cancel")((id) => cancelInternal(id, true))
 
-  const ownedBackground = owner ? or(ne(JobTable.kind, "subagent"), eq(JobTable.execution_owner, owner.id)) : undefined
+  const ownedBackground = owner ? eq(JobTable.execution_owner, owner.id) : undefined
 
   const cancelSession: Interface["cancelSession"] = Effect.fn("Job.cancelSession")(function* (sessionID) {
     const ids = [...(yield* SynchronizedRef.get(state.jobs)).values()]
@@ -618,6 +619,16 @@ export const make = Effect.gen(function* () {
     })
     return cancelled.filter((info): info is Info => info !== undefined)
   })
+
+  const isBackgroundRunning: Interface["isBackgroundRunning"] = Effect.fn("Job.isBackgroundRunning")((id) =>
+    db
+      .select({ id: JobTable.id })
+      .from(JobTable)
+      .where(and(eq(JobTable.id, id), eq(JobTable.status, "running")))
+      .limit(1)
+      .get()
+      .pipe(Effect.map(Boolean), Effect.orDie),
+  )
 
   const pendingBackground: Interface["pendingBackground"] = Effect.gen(function* () {
     const rows = yield* db
@@ -761,6 +772,7 @@ export const make = Effect.gen(function* () {
     backgroundAll,
     cancel,
     cancelSession,
+    isBackgroundRunning,
     pendingBackground,
     runningBackground,
     backgroundJobs: JobList.read(db, state.jobs),

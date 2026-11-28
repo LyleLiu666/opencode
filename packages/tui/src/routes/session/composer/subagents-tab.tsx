@@ -10,6 +10,8 @@ import { useTheme } from "../../../context/theme"
 import { useStorage } from "../../../context/storage"
 import { Locale } from "../../../util/locale"
 import { Keymap } from "../../../context/keymap"
+import { useToast } from "../../../ui/toast"
+import { errorMessage } from "../../../util/error"
 import { useComposerTab } from "./context"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
 import { ownedJobs, sessionFamily } from "../../../util/session"
@@ -33,6 +35,7 @@ export function SubagentsTab(props: { sessionID: string }) {
   const theme = useTheme()
   const navigate = useRoute().navigate
   const composer = useComposerTab()
+  const toast = useToast()
   const shortcuts = Keymap.useShortcuts()
 
   const session = createMemo(() => data.session.get(props.sessionID))
@@ -194,8 +197,10 @@ export function SubagentsTab(props: { sessionID: string }) {
         run() {
           const entry = selectedEntry()
           if (!entry) return
-          if (entry.status === "running") void client.api.session.interrupt({ sessionID: entry.sessionID })
-          entry.jobs.forEach((id) => void client.api.experimental.job.cancel({ id }))
+          void Promise.all([
+            ...(entry.status === "running" ? [client.api.session.interrupt({ sessionID: entry.sessionID })] : []),
+            ...entry.jobs.map((id) => client.api.experimental.job.cancel({ id })),
+          ]).catch((error) => toast.show({ variant: "error", message: errorMessage(error) }))
         },
       },
     ],

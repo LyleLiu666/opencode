@@ -90,7 +90,7 @@ export interface Interface {
   readonly claim: (sessionID: Session.ID) => Effect.Effect<boolean>
   readonly owns: (sessionID: Session.ID) => Effect.Effect<boolean>
   readonly recover: (sessionID: Session.ID) => Effect.Effect<boolean>
-  readonly recoverSubagent: (background: Job.Background) => Effect.Effect<boolean>
+  readonly recoverBackground: (background: Job.Background) => Effect.Effect<boolean>
   /** Releases the claim and resets resume accounting. Terminal events call this on commit. */
   readonly release: (sessionID: Session.ID) => Effect.Effect<void>
   /**
@@ -312,14 +312,17 @@ const layer = Layer.effect(
         if (!previous?.started || !previous.generation || !(yield* owner.departed(previous.owner))) return false
         return yield* replaceClaim(sessionID, previous)
       }),
-      recoverSubagent: Effect.fn("SessionStore.recoverSubagent")(function* (background) {
+      recoverBackground: Effect.fn("SessionStore.recoverBackground")(function* (background) {
         if (!owner) return true
         const recovery = background.recovery
         const previousOwner = background.executionOwner
-        if (recovery.kind !== "subagent" || !previousOwner || !(yield* owner.departed(previousOwner))) return false
-        const reservesChild =
-          background.status === "running" || (background.status === "cancelled" && background.error === undefined)
-        const previous = reservesChild ? yield* readClaim(recovery.childSessionID) : undefined
+        if (!previousOwner || !(yield* owner.departed(previousOwner))) return false
+        const child =
+          recovery.kind === "subagent" &&
+          (background.status === "running" || (background.status === "cancelled" && background.error === undefined))
+            ? recovery.childSessionID
+            : undefined
+        const previous = child ? yield* readClaim(child) : undefined
         // A separately driven child can be live under a different owner. Its claim must not be moved or released.
         if (previous?.started && (previous.owner !== previousOwner || !previous.generation)) return false
         return yield* db
@@ -340,7 +343,7 @@ const layer = Layer.effect(
                   .get()
                   .pipe(Effect.orDie)
                 if (!job) return false
-                if (previous && !(yield* replaceClaim(recovery.childSessionID, previous))) {
+                if (child && previous && !(yield* replaceClaim(child, previous))) {
                   return yield* Effect.fail("claim-changed" as const)
                 }
                 return true

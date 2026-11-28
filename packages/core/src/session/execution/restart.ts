@@ -433,9 +433,9 @@ export const layer = (options?: Options) =>
             ),
           )
           const pending = yield* Effect.filter(rows, (background) => {
-            if (background.recovery.kind !== "subagent") return Effect.succeed(true)
-            if (active.has(background.recovery.childSessionID)) return Effect.succeed(false)
-            return store.recoverSubagent(background)
+            if (background.recovery.kind === "subagent" && active.has(background.recovery.childSessionID))
+              return Effect.succeed(false)
+            return store.recoverBackground(background)
           })
           yield* store.releaseOrphanedChildClaims()
           // Job.cancel persists the cancellation before interrupting the execution. A crash
